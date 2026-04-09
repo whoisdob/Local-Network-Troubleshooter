@@ -1,0 +1,22 @@
+{
+  "interval_seconds": 30,
+  "dns_timeout_seconds": 2.0,
+  "tcp_timeout_seconds": 2.0,
+  "ping_count": 1,
+  "ping_timeout_seconds": 2,
+  "dns_servers": ["192.168.181.5", "8.8.8.8"],
+  "dns_probe_hosts": ["cloudflare.com", "google.com"],
+  "latency_targets": [
+    {"name": "router", "host": "192.168.181.1"},
+    {"name": "ha_adguard_host", "host": "192.168.181.5"},
+    {"name": "internet_google", "host": "8.8.8.8"},
+    {"name": "internet_cloudflare", "host": "1.1.1.1"}
+  ],
+  "tcp_targets": [
+    {"name": "router_dns", "host": "192.168.181.1", "port": 53},
+    {"name": "adguard_dns", "host": "192.168.181.5", "port": 53},
+    {"name": "adguard_dns_tls", "host": "192.168.181.5", "port": 853},
+    {"name": "adguard_dns_https", "host": "192.168.181.5", "port": 443},
+    {"name": "cloudflare_https", "host": "1.1.1.1", "port": 443}
+  ]
+}
