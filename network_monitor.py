@@ -24,6 +24,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
+from zoneinfo import ZoneInfo
 
 
 @dataclass
@@ -342,7 +343,13 @@ def inspect_router_bundle(bundle: Path, output: Optional[Path], max_matches: int
     return 0
 
 
-def html_report(csv_path: Path, output_path: Path, since_hours: int, router_bundle: Optional[Path] = None) -> None:
+def html_report(
+    csv_path: Path,
+    output_path: Path,
+    since_hours: int,
+    router_bundle: Optional[Path] = None,
+    display_timezone: str = "browser",
+) -> None:
     if not csv_path.exists():
         raise FileNotFoundError(f"No log file: {csv_path}")
 
@@ -537,6 +544,19 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int, router_bund
     if router_bundle is not None:
         router_lines, router_notes = _scan_router_bundle(router_bundle)
 
+    def _format_display_ts(utc_iso: str) -> str:
+        if display_timezone.lower() in ("utc", "browser"):
+            return utc_iso
+        dt = datetime.fromisoformat(utc_iso)
+        try:
+            tz = ZoneInfo(display_timezone)
+        except Exception:  # noqa: BLE001
+            return utc_iso
+        return dt.astimezone(tz).isoformat()
+
+    generated_utc = iso_now()
+    generated_display = _format_display_ts(generated_utc)
+
     html = [
         "<html><head><meta charset='utf-8'><title>Network Report</title>",
         (
@@ -553,7 +573,10 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int, router_bund
         ),
         "</head><body>",
         f"<h1>Network monitor report (last {since_hours}h)</h1>",
-        f"<p>Generated: {iso_now()}</p>",
+        (
+            f"<p>Generated: {generated_display} "
+            f"(display timezone: {display_timezone}, source UTC: {generated_utc})</p>"
+        ),
         "<div class='card'>"
         f"<strong>Quick summary:</strong> Targets={len(summary_rows)} | "
         f"Total failures={total_failures} | "
@@ -581,12 +604,21 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int, router_bund
             "or median latency >= 80ms).</p>"
         )
         html.append(
-            "<table><tr><th>Timestamp (UTC)</th><th>Fail rate %</th><th>Median latency ms</th><th>Dominant area</th><th>Hint</th></tr>"
+            "<table><tr><th>Timestamp</th><th>Fail rate %</th><th>Median latency ms</th><th>Dominant area</th><th>Hint</th></tr>"
         )
         for inc in incident_rows[:50]:
+            ts_utc = str(inc["timestamp"])
+            if display_timezone.lower() == "browser":
+                ts_cell = f"<span class='utc-ts' data-utc='{ts_utc}'>{ts_utc}</span>"
+            else:
+                ts_cell = _format_display_ts(ts_utc)
             html.append(
                 "<tr><td>{timestamp}</td><td>{fail_rate}</td><td>{median_latency}</td><td>{dominant}</td><td>{hint}</td></tr>".format(
-                    **inc
+                    timestamp=ts_cell,
+                    fail_rate=inc["fail_rate"],
+                    median_latency=inc["median_latency"],
+                    dominant=inc["dominant"],
+                    hint=inc["hint"],
                 )
             )
         html.append("</table>")
@@ -626,7 +658,16 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int, router_bund
                 p95_ms=row["p95_ms"],
             )
         )
-    html.append("</table></body></html>")
+    html.append("</table>")
+    if display_timezone.lower() == "browser":
+        html.append(
+            "<script>"
+            "document.querySelectorAll('.utc-ts').forEach(function(el){"
+            "try{const d=new Date(el.dataset.utc);el.textContent=d.toLocaleString();}catch(e){}"
+            "});"
+            "</script>"
+        )
+    html.append("</body></html>")
 
     ensure_parent(output_path)
     output_path.write_text("\n".join(html), encoding="utf-8")
@@ -647,6 +688,11 @@ def parse_args() -> argparse.Namespace:
     rep_p.add_argument("--output", default="logs/network_report.html", type=Path)
     rep_p.add_argument("--since-hours", type=int, default=24)
     rep_p.add_argument("--router-bundle", type=Path, default=None, help="Optional router tar/tar.gz log bundle")
+    rep_p.add_argument(
+        "--display-timezone",
+        default="browser",
+        help="Timezone for report display: 'browser' (default), 'UTC', or IANA name like 'America/New_York'",
+    )
 
     rb_p = sub.add_parser("inspect-router-bundle", help="Inspect router tar/tar.gz logs standalone")
     rb_p.add_argument("--bundle", type=Path, required=True, help="Path to router tar/tar.gz bundle")
@@ -676,7 +722,7 @@ def main() -> int:
         return 0
 
     if args.command == "report":
-        html_report(args.csv, args.output, args.since_hours, args.router_bundle)
+        html_report(args.csv, args.output, args.since_hours, args.router_bundle, args.display_timezone)
         print(f"Wrote report to {args.output}")
         return 0
 

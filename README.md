@@ -38,6 +38,7 @@ python3 network_monitor.py report --csv logs/network_log.csv --output logs/netwo
 ```
 
 The report now includes a **Plain-English diagnosis** section that highlights likely issue domains (local DNS/AdGuard, LAN path, or WAN/ISP) based on comparative success rates and P95 latency across target groups.
+By default, report timestamps are displayed in your browser's local timezone (`--display-timezone browser`). You can override with `--display-timezone UTC` or an IANA timezone like `--display-timezone America/New_York`.
 
 You can also include a router log bundle (tar/tar.gz) in the report generation step:
 
