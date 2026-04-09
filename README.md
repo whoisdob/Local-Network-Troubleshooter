@@ -21,10 +21,28 @@ This helps isolate whether slowness is:
 ```bash
 python3 network_monitor.py init-config --output config.json
 # edit config.json for your IPs and targets
-python3 network_monitor.py run --config config.json
+python3 network_monitor.py run
 ```
 
 By default, probes run every `30` seconds (`interval_seconds`). If outages are very brief, increase sampling frequency (for example `5`-`10` seconds), but note that this increases probe traffic and log volume.
+
+### Simplest startup commands
+
+If you want minimal commands:
+
+```bash
+# terminal 1: collect probes
+python3 network_monitor.py run
+
+# terminal 2: keep HTML refreshed
+python3 network_monitor.py watch-report
+```
+
+Or use a single command that launches both:
+
+```bash
+python3 network_monitor.py start
+```
 
 Logs are written to:
 
@@ -78,6 +96,17 @@ python3 network_monitor.py watch-report \
   --display-timezone browser \
   --interval-seconds 60
 ```
+
+## Running on a MacBook Pro (for mesh-hop testing)
+
+Yes — this tool works well for that use case:
+- run it on your Mac in different physical locations (near router vs mesh hop areas)
+- compare generated reports from each location to isolate Wi-Fi/mesh backhaul effects
+
+macOS quick notes:
+- verify Python 3: `python3 --version`
+- if needed, create config once: `python3 network_monitor.py init-config --output config.json`
+- then run with defaults: `python3 network_monitor.py start`
 
 ## DNS probe hostnames (`dns_probe_hosts`)
 

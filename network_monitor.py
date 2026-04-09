@@ -82,6 +82,9 @@ def ping_latency_ms(host: str, timeout_seconds: int, count: int) -> tuple[bool, 
     # Cross-platform ping flags: Linux/macOS use -c/-W, Windows use -n/-w(ms).
     if sys.platform.startswith("win"):
         cmd = ["ping", "-n", str(count), "-w", str(timeout_seconds * 1000), host]
+    elif sys.platform == "darwin":
+        # macOS expects -W timeout in milliseconds.
+        cmd = ["ping", "-c", str(count), "-W", str(timeout_seconds * 1000), host]
     else:
         cmd = ["ping", "-c", str(count), "-W", str(timeout_seconds), host]
 
@@ -817,6 +820,16 @@ def parse_args() -> argparse.Namespace:
     wr_p.add_argument("--display-timezone", default="browser")
     wr_p.add_argument("--interval-seconds", type=int, default=60, help="Report refresh interval")
 
+    start_p = sub.add_parser("start", help="Start monitor and auto-refresh report together")
+    start_p.add_argument("--config", default="config.json", type=Path)
+    start_p.add_argument("--csv", default="logs/network_log.csv", type=Path)
+    start_p.add_argument("--jsonl", default="logs/network_log.jsonl", type=Path)
+    start_p.add_argument("--output", default="logs/network_report.html", type=Path)
+    start_p.add_argument("--since-hours", type=int, default=24)
+    start_p.add_argument("--display-timezone", default="browser")
+    start_p.add_argument("--router-bundle", type=Path, default=None)
+    start_p.add_argument("--report-interval-seconds", type=int, default=60)
+
     rb_p = sub.add_parser("inspect-router-bundle", help="Inspect router tar/tar.gz logs standalone")
     rb_p.add_argument("--bundle", type=Path, required=True, help="Path to router tar/tar.gz bundle")
     rb_p.add_argument("--output", type=Path, default=None, help="Optional text report output path")
@@ -864,6 +877,63 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"[{iso_now()}] watch-report error: {exc}")
             time.sleep(max(1, int(args.interval_seconds)))
+
+    if args.command == "start":
+        script_path = Path(__file__).resolve()
+        monitor_cmd = [
+            sys.executable,
+            str(script_path),
+            "run",
+            "--config",
+            str(args.config),
+            "--csv",
+            str(args.csv),
+            "--jsonl",
+            str(args.jsonl),
+        ]
+        watch_cmd = [
+            sys.executable,
+            str(script_path),
+            "watch-report",
+            "--csv",
+            str(args.csv),
+            "--output",
+            str(args.output),
+            "--since-hours",
+            str(args.since_hours),
+            "--display-timezone",
+            str(args.display_timezone),
+            "--interval-seconds",
+            str(args.report_interval_seconds),
+        ]
+        if args.router_bundle is not None:
+            watch_cmd.extend(["--router-bundle", str(args.router_bundle)])
+
+        print("Starting monitor + auto-report with defaults...")
+        print("Monitor command:", " ".join(monitor_cmd))
+        print("Report command:", " ".join(watch_cmd))
+        monitor_proc = subprocess.Popen(monitor_cmd)
+        watch_proc = subprocess.Popen(watch_cmd)
+        try:
+            while True:
+                if monitor_proc.poll() is not None:
+                    print("Monitor process exited; stopping watcher.")
+                    return monitor_proc.returncode or 1
+                if watch_proc.poll() is not None:
+                    print("Watch-report process exited; stopping monitor.")
+                    return watch_proc.returncode or 1
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("Stopping child processes...")
+        finally:
+            for proc in (monitor_proc, watch_proc):
+                if proc.poll() is None:
+                    proc.terminate()
+            time.sleep(0.5)
+            for proc in (monitor_proc, watch_proc):
+                if proc.poll() is None:
+                    proc.kill()
+        return 0
 
     return 1
 
