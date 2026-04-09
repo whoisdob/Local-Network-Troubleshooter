@@ -574,7 +574,7 @@ def html_report(
                     "severity": ("High" if fail_rate >= 40 or (median_latency or 0) >= 120 else "Medium"),
                 }
             )
-            hour_bucket = datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:00")
+            hour_bucket = datetime.fromisoformat(ts).replace(minute=0, second=0, microsecond=0).isoformat()
             incident_hour_counts[hour_bucket] = incident_hour_counts.get(hour_bucket, 0) + 1
 
     router_lines: list[str] = []
@@ -684,9 +684,14 @@ def html_report(
             )
         html.append("</table>")
         html.append("<h4>Incident count by hour</h4>")
-        html.append("<table id='incident-hour-table'><tr><th class='sortable'>Hour (UTC)</th><th class='sortable'>Incident count</th></tr>")
+        hour_label = "Hour (browser local)" if display_timezone.lower() == "browser" else f"Hour ({display_timezone})"
+        html.append(f"<table id='incident-hour-table'><tr><th class='sortable'>{hour_label}</th><th class='sortable'>Incident count</th></tr>")
         for hour, count in sorted(incident_hour_counts.items()):
-            html.append(f"<tr><td>{hour}</td><td>{count}</td></tr>")
+            if display_timezone.lower() == "browser":
+                hour_cell = f"<span class='utc-hour' data-utc-hour='{hour}'>{hour}</span>"
+            else:
+                hour_cell = _format_display_ts(hour)
+            html.append(f"<tr><td>{hour_cell}</td><td>{count}</td></tr>")
         html.append("</table>")
     else:
         html.append("<p>No high-severity incident windows were detected using current thresholds.</p>")
@@ -736,6 +741,11 @@ def html_report(
             "<script>"
             "document.querySelectorAll('.utc-ts').forEach(function(el){"
             "try{const d=new Date(el.dataset.utc);el.textContent=d.toLocaleString();}catch(e){}"
+            "});"
+            "document.querySelectorAll('.utc-hour').forEach(function(el){"
+            "try{const d=new Date(el.dataset.utcHour);"
+            "el.textContent=d.toLocaleString([], {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});"
+            "}catch(e){}"
             "});"
             "</script>"
         )

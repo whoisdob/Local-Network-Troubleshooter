@@ -42,7 +42,7 @@ By default, report timestamps are displayed in your browser's local timezone (`-
 The report tables (including **Target**) are sortable by clicking column headers, and include a legend explaining `Dominant area` values and hint interpretation.
 It also includes:
 - severity labels on incident windows
-- incident count-by-hour rollups
+- incident count-by-hour rollups (displayed in browser local time when using `--display-timezone browser`)
 - confidence-scored hypotheses
 - actionable playbooks ("if this, then do this")
 
