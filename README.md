@@ -39,7 +39,12 @@ python3 network_monitor.py report --csv logs/network_log.csv --output logs/netwo
 
 The report now includes a **Plain-English diagnosis** section that highlights likely issue domains (local DNS/AdGuard, LAN path, or WAN/ISP) based on comparative success rates and P95 latency across target groups.
 By default, report timestamps are displayed in your browser's local timezone (`--display-timezone browser`). You can override with `--display-timezone UTC` or an IANA timezone like `--display-timezone America/New_York`.
-The report tables are sortable by clicking column headers, and include a legend explaining `Dominant area` values and hint interpretation.
+The report tables (including **Target**) are sortable by clicking column headers, and include a legend explaining `Dominant area` values and hint interpretation.
+It also includes:
+- severity labels on incident windows
+- incident count-by-hour rollups
+- confidence-scored hypotheses
+- actionable playbooks ("if this, then do this")
 
 You can also include a router log bundle (tar/tar.gz) in the report generation step:
 
@@ -61,6 +66,17 @@ If you want to inspect a router bundle **without mixing it into monitor report o
 python3 network_monitor.py inspect-router-bundle \
   --bundle /path/to/router_logs.tar \
   --output logs/router_bundle_inspection.txt
+```
+
+To auto-refresh the HTML report on a schedule (no manual regeneration):
+
+```bash
+python3 network_monitor.py watch-report \
+  --csv logs/network_log.csv \
+  --output logs/network_report.html \
+  --since-hours 24 \
+  --display-timezone browser \
+  --interval-seconds 60
 ```
 
 ## DNS probe hostnames (`dns_probe_hosts`)

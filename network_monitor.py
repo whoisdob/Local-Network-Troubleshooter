@@ -447,8 +447,11 @@ def html_report(
         lambda r: ("router" in str(r["target"])) or ("ha_" in str(r["target"])) or ("adguard" in str(r["target"])),
     )
 
-    diagnosis: list[str] = []
+    hypotheses: list[dict] = []
     next_steps: list[str] = []
+
+    def _add_hypothesis(text: str, score: float) -> None:
+        hypotheses.append({"text": text, "score": max(1, min(99, round(score, 1)))})
 
     local_dns_success = _mean(local_dns_rows, "success_pct")
     public_dns_success = _mean(public_dns_rows, "success_pct")
@@ -461,50 +464,82 @@ def html_report(
 
     if local_dns_success is not None and public_dns_success is not None:
         if (public_dns_success - local_dns_success) >= 0.8:
-            diagnosis.append(
-                f"Local DNS path looks less reliable than public DNS ({local_dns_success}% vs {public_dns_success}% success)."
+            gap = public_dns_success - local_dns_success
+            _add_hypothesis(
+                f"Local DNS path looks less reliable than public DNS ({local_dns_success}% vs {public_dns_success}% success).",
+                55 + (gap * 20),
             )
             next_steps.append(
                 "Inspect AdGuard/HA CPU, memory, and DNS upstream settings; check whether packet loss exists between clients and the DNS host."
             )
         elif (local_dns_success - public_dns_success) >= 0.8:
-            diagnosis.append(
-                f"Public DNS path looks less reliable than local DNS ({public_dns_success}% vs {local_dns_success}% success), suggesting WAN/upstream DNS instability."
+            gap = local_dns_success - public_dns_success
+            _add_hypothesis(
+                f"Public DNS path looks less reliable than local DNS ({public_dns_success}% vs {local_dns_success}% success), suggesting WAN/upstream DNS instability.",
+                55 + (gap * 20),
             )
             next_steps.append("Check ISP path quality and test alternate upstream resolvers in AdGuard.")
 
     if local_dns_p95 is not None and public_dns_p95 is not None:
         if local_dns_p95 > (public_dns_p95 * 1.5):
-            diagnosis.append(
-                f"Local DNS latency spikes are higher than public DNS (P95 {local_dns_p95}ms vs {public_dns_p95}ms)."
+            ratio = local_dns_p95 / max(public_dns_p95, 1)
+            _add_hypothesis(
+                f"Local DNS latency spikes are higher than public DNS (P95 {local_dns_p95}ms vs {public_dns_p95}ms).",
+                45 + (ratio * 12),
             )
             next_steps.append("Review AdGuard host load and query logs during spike windows.")
 
     if internet_success is not None and lan_success is not None and internet_success < (lan_success - 0.5):
-        diagnosis.append(
-            f"WAN/ISP path likely contributes to drops (internet success {internet_success}% vs LAN-related {lan_success}%)."
+        gap = lan_success - internet_success
+        _add_hypothesis(
+            f"WAN/ISP path likely contributes to drops (internet success {internet_success}% vs LAN-related {lan_success}%).",
+            55 + (gap * 20),
         )
         next_steps.append("Capture modem signal/event logs and compare timestamps with monitor failures.")
 
     if internet_p95 is not None and lan_p95 is not None and internet_p95 > (lan_p95 * 1.4):
-        diagnosis.append(
-            f"WAN jitter appears higher than LAN jitter (internet P95 {internet_p95}ms vs LAN P95 {lan_p95}ms)."
+        ratio = internet_p95 / max(lan_p95, 1)
+        _add_hypothesis(
+            f"WAN jitter appears higher than LAN jitter (internet P95 {internet_p95}ms vs LAN P95 {lan_p95}ms).",
+            45 + (ratio * 12),
         )
         next_steps.append("Look for ISP congestion windows and bufferbloat under upload/download load.")
 
     worst = summary_rows[0] if summary_rows else None
     if worst is not None and worst["success_pct"] < 99.0:
-        diagnosis.append(
-            f"Most problematic target in this window: '{worst['target_label']}' ({worst['success_pct']}% success, P95 {worst['p95_ms']}ms)."
+        _add_hypothesis(
+            f"Most problematic target in this window: '{worst['target_label']}' ({worst['success_pct']}% success, P95 {worst['p95_ms']}ms).",
+            35 + ((99.0 - worst["success_pct"]) * 20),
         )
 
-    if not diagnosis:
-        diagnosis.append(
+    if not hypotheses:
+        _add_hypothesis(
             "No single dominant root cause stood out in this window; failures/latency are relatively distributed across targets."
+            ,25
         )
         next_steps.append("Run longer (24-72h) and correlate failures to exact time windows, then compare with ISP/router logs.")
 
+    action_plan: list[str] = []
+    if local_dns_success is not None and public_dns_success is not None and (public_dns_success - local_dns_success) >= 0.8:
+        action_plan.append(
+            "Priority 1: Validate local DNS path. For one client, temporarily bypass local DNS for 30-60 minutes and compare user experience."
+        )
+        action_plan.append(
+            "Priority 2: On HA/AdGuard host, check CPU, memory pressure, and DNS upstream timeout counters during failure windows."
+        )
+    if internet_p95 is not None and lan_p95 is not None and internet_p95 > (lan_p95 * 1.4):
+        action_plan.append(
+            "Priority 1: Investigate WAN jitter/bufferbloat. Run a simultaneous upload/download test and observe whether latency spikes align."
+        )
+    if worst is not None and "router" in worst["target"]:
+        action_plan.append(
+            "Priority 2: Router/LAN check. Compare one wired client vs one Wi-Fi client to separate RF issues from upstream issues."
+        )
+    if not action_plan:
+        action_plan.append("No urgent single action detected. Continue collecting 24-72h and focus on repeated incident windows.")
+
     incident_rows = []
+    incident_hour_counts: dict[str, int] = {}
     for ts, items in sorted(snapshots.items()):
         total = len(items)
         failures = [x for x in items if str(x.get("success", "")).lower() != "true"]
@@ -536,8 +571,11 @@ def html_report(
                     "median_latency": round(median_latency, 2) if median_latency is not None else None,
                     "dominant": dominant,
                     "hint": hint,
+                    "severity": ("High" if fail_rate >= 40 or (median_latency or 0) >= 120 else "Medium"),
                 }
             )
+            hour_bucket = datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:00")
+            incident_hour_counts[hour_bucket] = incident_hour_counts.get(hour_bucket, 0) + 1
 
     router_lines: list[str] = []
     router_notes: list[str] = []
@@ -592,13 +630,18 @@ def html_report(
             " Outages shorter than this can be missed between checks."
             "</div>"
         )
-    html.append("<div class='card'><h3>Plain-English diagnosis</h3><ul>")
-    for d in diagnosis:
-        html.append(f"<li>{d}</li>")
+    html.append("<div class='card'><h3>Plain-English diagnosis</h3>")
+    html.append("<table><tr><th>Hypothesis</th><th>Confidence %</th></tr>")
+    for h in sorted(hypotheses, key=lambda x: -x["score"]):
+        html.append(f"<tr><td>{h['text']}</td><td>{h['score']}</td></tr>")
+    html.append("</table><ul>")
     html.append("</ul><h4>Suggested next checks</h4><ul>")
     for step in next_steps:
         html.append(f"<li>{step}</li>")
-    html.append("</ul></div>")
+    html.append("</ul><h4>Action plan</h4><ol>")
+    for step in action_plan:
+        html.append(f"<li>{step}</li>")
+    html.append("</ol></div>")
     html.append("<div class='card'><h3>Automated correlation checklist</h3>")
     html.append(
         "<div class='card'><h4>Legend</h4>"
@@ -621,7 +664,7 @@ def html_report(
             "or median latency >= 80ms).</p>"
         )
         html.append(
-            "<table id='incident-table'><tr><th class='sortable'>Timestamp</th><th class='sortable'>Fail rate %</th><th class='sortable'>Median latency ms</th><th class='sortable'>Dominant area</th><th class='sortable'>Hint</th></tr>"
+            "<table id='incident-table'><tr><th class='sortable'>Timestamp</th><th class='sortable'>Severity</th><th class='sortable'>Fail rate %</th><th class='sortable'>Median latency ms</th><th class='sortable'>Dominant area</th><th class='sortable'>Hint</th></tr>"
         )
         for inc in incident_rows[:50]:
             ts_utc = str(inc["timestamp"])
@@ -630,14 +673,20 @@ def html_report(
             else:
                 ts_cell = _format_display_ts(ts_utc)
             html.append(
-                "<tr><td>{timestamp}</td><td>{fail_rate}</td><td>{median_latency}</td><td>{dominant}</td><td>{hint}</td></tr>".format(
+                "<tr><td>{timestamp}</td><td>{severity}</td><td>{fail_rate}</td><td>{median_latency}</td><td>{dominant}</td><td>{hint}</td></tr>".format(
                     timestamp=ts_cell,
+                    severity=inc["severity"],
                     fail_rate=inc["fail_rate"],
                     median_latency=inc["median_latency"],
                     dominant=inc["dominant"],
                     hint=inc["hint"],
                 )
             )
+        html.append("</table>")
+        html.append("<h4>Incident count by hour</h4>")
+        html.append("<table id='incident-hour-table'><tr><th class='sortable'>Hour (UTC)</th><th class='sortable'>Incident count</th></tr>")
+        for hour, count in sorted(incident_hour_counts.items()):
+            html.append(f"<tr><td>{hour}</td><td>{count}</td></tr>")
         html.append("</table>")
     else:
         html.append("<p>No high-severity incident windows were detected using current thresholds.</p>")
@@ -656,6 +705,12 @@ def html_report(
                 html.append(f"<li><code>{line}</code></li>")
             html.append("</ul>")
     html.append("</div>")
+    html.append("<div class='card'><h3>Playbooks (if this, then do this)</h3><ul>")
+    html.append("<li><strong>local_dns:</strong> Test one device on public DNS for 30-60 min; compare failures. Check AdGuard upstream timeout/error counters.</li>")
+    html.append("<li><strong>public_dns / wan:</strong> Collect modem signal/event logs and run latency-under-load test (bufferbloat check).</li>")
+    html.append("<li><strong>router_lan:</strong> Compare wired vs Wi-Fi client behavior; inspect router CPU and channel interference.</li>")
+    html.append("<li><strong>ha_adguard_host:</strong> Check VM memory pressure/swap and host contention during incident windows.</li>")
+    html.append("</ul></div>")
     html.append(
         "<table id='health-table'><tr><th class='sortable'>Health</th><th class='sortable'>Target</th><th class='sortable'>Samples</th><th class='sortable'>Success</th><th class='sortable'>Failures</th><th class='sortable'>Success %</th><th class='sortable'>Avg ms</th><th class='sortable'>P95 ms</th></tr>"
     )
@@ -687,9 +742,9 @@ def html_report(
     html.append(
         "<script>"
         "function toSortable(v){"
-        "const n=parseFloat(String(v).replace(/[^0-9.\\-]/g,''));"
-        "if(!Number.isNaN(n)) return {type:'num',value:n};"
-        "return {type:'str',value:String(v).toLowerCase()};"
+        "const s=String(v).trim();"
+        "if(/^[-+]?\\d+(\\.\\d+)?$/.test(s)){return {type:'num',value:parseFloat(s)};}"
+        "return {type:'str',value:s.toLowerCase()};"
         "}"
         "function makeSortable(tableId){"
         "const table=document.getElementById(tableId);"
@@ -714,6 +769,7 @@ def html_report(
         "}"
         "makeSortable('incident-table');"
         "makeSortable('health-table');"
+        "makeSortable('incident-hour-table');"
         "</script>"
     )
     html.append("</body></html>")
@@ -742,6 +798,14 @@ def parse_args() -> argparse.Namespace:
         default="browser",
         help="Timezone for report display: 'browser' (default), 'UTC', or IANA name like 'America/New_York'",
     )
+
+    wr_p = sub.add_parser("watch-report", help="Continuously refresh HTML report on an interval")
+    wr_p.add_argument("--csv", default="logs/network_log.csv", type=Path)
+    wr_p.add_argument("--output", default="logs/network_report.html", type=Path)
+    wr_p.add_argument("--since-hours", type=int, default=24)
+    wr_p.add_argument("--router-bundle", type=Path, default=None)
+    wr_p.add_argument("--display-timezone", default="browser")
+    wr_p.add_argument("--interval-seconds", type=int, default=60, help="Report refresh interval")
 
     rb_p = sub.add_parser("inspect-router-bundle", help="Inspect router tar/tar.gz logs standalone")
     rb_p.add_argument("--bundle", type=Path, required=True, help="Path to router tar/tar.gz bundle")
@@ -777,6 +841,19 @@ def main() -> int:
 
     if args.command == "inspect-router-bundle":
         return inspect_router_bundle(args.bundle, args.output, args.max_matches)
+
+    if args.command == "watch-report":
+        print(
+            f"Watching report: csv={args.csv}, output={args.output}, every={args.interval_seconds}s, "
+            f"timezone={args.display_timezone}"
+        )
+        while True:
+            try:
+                html_report(args.csv, args.output, args.since_hours, args.router_bundle, args.display_timezone)
+                print(f"[{iso_now()}] refreshed {args.output}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{iso_now()}] watch-report error: {exc}")
+            time.sleep(max(1, int(args.interval_seconds)))
 
     return 1
 
