@@ -24,6 +24,8 @@ python3 network_monitor.py init-config --output config.json
 python3 network_monitor.py run --config config.json
 ```
 
+By default, probes run every `30` seconds (`interval_seconds`). If outages are very brief, increase sampling frequency (for example `5`-`10` seconds), but note that this increases probe traffic and log volume.
+
 Logs are written to:
 
 - `logs/network_log.csv`

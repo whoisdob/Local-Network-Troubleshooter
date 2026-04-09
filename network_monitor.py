@@ -269,18 +269,98 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int) -> None:
         lat = [float(x["latency_ms"]) for x in items if x["latency_ms"] not in ("", "None", None)]
         p95 = round(sorted(lat)[int(len(lat) * 0.95) - 1], 2) if lat else None
         avg = round(statistics.mean(lat), 2) if lat else None
-        summary_rows.append((target, total, ok_count, round((ok_count / total) * 100.0, 1), avg, p95))
+        success_pct = round((ok_count / total) * 100.0, 1)
+        failures = total - ok_count
+        if success_pct < 98.5 or (p95 is not None and p95 > 120):
+            health = "Needs attention"
+        elif success_pct < 99.5 or (p95 is not None and p95 > 80):
+            health = "Watch"
+        else:
+            health = "Healthy"
+        summary_rows.append(
+            {
+                "target": target,
+                "target_label": target.replace("_", " "),
+                "samples": total,
+                "success": ok_count,
+                "failures": failures,
+                "success_pct": success_pct,
+                "avg_ms": avg,
+                "p95_ms": p95,
+                "health": health,
+            }
+        )
+
+    # Worst-first ordering makes the report easier to read quickly.
+    summary_rows.sort(key=lambda r: (r["success_pct"], -(r["p95_ms"] or 0.0)))
+
+    # Infer observed polling cadence from timestamps (best effort).
+    cadence_seconds = None
+    if rows:
+        ts_values = sorted(
+            {
+                datetime.fromisoformat(r["timestamp"]).timestamp()
+                for r in rows
+                if r.get("timestamp")
+            }
+        )
+        if len(ts_values) >= 2:
+            deltas = [b - a for a, b in zip(ts_values, ts_values[1:]) if (b - a) > 0]
+            if deltas:
+                cadence_seconds = round(statistics.median(deltas), 2)
+
+    avg_success = round(statistics.mean([r["success_pct"] for r in summary_rows]), 2) if summary_rows else None
+    total_failures = sum(r["failures"] for r in summary_rows)
 
     html = [
         "<html><head><meta charset='utf-8'><title>Network Report</title>",
-        "<style>body{font-family:Arial;margin:20px;}table{border-collapse:collapse;}th,td{border:1px solid #ccc;padding:6px;}th{background:#eee;}</style>",
+        (
+            "<style>"
+            "body{font-family:Arial;margin:20px;}"
+            "table{border-collapse:collapse;}"
+            "th,td{border:1px solid #ccc;padding:6px;}"
+            "th{background:#eee;}"
+            ".card{border:1px solid #ddd;background:#fafafa;padding:10px;margin:10px 0;}"
+            ".healthy{background:#eef9f0;}"
+            ".watch{background:#fff8e8;}"
+            ".needs-attention{background:#ffecec;}"
+            "</style>"
+        ),
         "</head><body>",
         f"<h1>Network monitor report (last {since_hours}h)</h1>",
         f"<p>Generated: {iso_now()}</p>",
-        "<table><tr><th>Target</th><th>Samples</th><th>Success</th><th>Success %</th><th>Avg ms</th><th>P95 ms</th></tr>",
+        "<div class='card'>"
+        f"<strong>Quick summary:</strong> Targets={len(summary_rows)} | "
+        f"Total failures={total_failures} | "
+        f"Average success across targets={avg_success}%"
+        "</div>",
     ]
+    if cadence_seconds is not None:
+        html.append(
+            "<div class='card'>"
+            f"<strong>Observed polling cadence:</strong> about every {cadence_seconds} seconds."
+            " Outages shorter than this can be missed between checks."
+            "</div>"
+        )
+    html.append(
+        "<table><tr><th>Health</th><th>Target</th><th>Samples</th><th>Success</th><th>Failures</th><th>Success %</th><th>Avg ms</th><th>P95 ms</th></tr>"
+    )
     for row in summary_rows:
-        html.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>")
+        row_class = row["health"].lower().replace(" ", "-")
+        html.append(
+            "<tr class='{row_class}'><td>{health}</td><td>{target}</td><td>{samples}</td><td>{success}</td>"
+            "<td>{failures}</td><td>{success_pct}</td><td>{avg_ms}</td><td>{p95_ms}</td></tr>".format(
+                row_class=row_class,
+                health=row["health"],
+                target=row["target_label"],
+                samples=row["samples"],
+                success=row["success"],
+                failures=row["failures"],
+                success_pct=row["success_pct"],
+                avg_ms=row["avg_ms"],
+                p95_ms=row["p95_ms"],
+            )
+        )
     html.append("</table></body></html>")
 
     ensure_parent(output_path)
