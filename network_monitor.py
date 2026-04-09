@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ipaddress
 import json
 import os
 import socket
@@ -312,6 +313,89 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int) -> None:
     avg_success = round(statistics.mean([r["success_pct"] for r in summary_rows]), 2) if summary_rows else None
     total_failures = sum(r["failures"] for r in summary_rows)
 
+    def _is_private_ip_in_target(target: str) -> bool:
+        for token in target.replace("-", "_").split("_"):
+            candidate = token.replace("-", ".")
+            try:
+                if ipaddress.ip_address(candidate).is_private:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    def _group(rows_: list[dict], predicate) -> list[dict]:
+        return [r for r in rows_ if predicate(r)]
+
+    def _mean(items: list[dict], field: str) -> Optional[float]:
+        values = [float(i[field]) for i in items if i.get(field) is not None]
+        return round(statistics.mean(values), 2) if values else None
+
+    dns_rows = _group(summary_rows, lambda r: str(r["target"]).startswith("dns_"))
+    local_dns_rows = _group(dns_rows, lambda r: _is_private_ip_in_target(str(r["target"])))
+    public_dns_rows = _group(dns_rows, lambda r: not _is_private_ip_in_target(str(r["target"])))
+    internet_rows = _group(summary_rows, lambda r: "internet_" in str(r["target"]))
+    lan_rows = _group(
+        summary_rows,
+        lambda r: ("router" in str(r["target"])) or ("ha_" in str(r["target"])) or ("adguard" in str(r["target"])),
+    )
+
+    diagnosis: list[str] = []
+    next_steps: list[str] = []
+
+    local_dns_success = _mean(local_dns_rows, "success_pct")
+    public_dns_success = _mean(public_dns_rows, "success_pct")
+    local_dns_p95 = _mean(local_dns_rows, "p95_ms")
+    public_dns_p95 = _mean(public_dns_rows, "p95_ms")
+    internet_success = _mean(internet_rows, "success_pct")
+    lan_success = _mean(lan_rows, "success_pct")
+    internet_p95 = _mean(internet_rows, "p95_ms")
+    lan_p95 = _mean(lan_rows, "p95_ms")
+
+    if local_dns_success is not None and public_dns_success is not None:
+        if (public_dns_success - local_dns_success) >= 0.8:
+            diagnosis.append(
+                f"Local DNS path looks less reliable than public DNS ({local_dns_success}% vs {public_dns_success}% success)."
+            )
+            next_steps.append(
+                "Inspect AdGuard/HA CPU, memory, and DNS upstream settings; check whether packet loss exists between clients and the DNS host."
+            )
+        elif (local_dns_success - public_dns_success) >= 0.8:
+            diagnosis.append(
+                f"Public DNS path looks less reliable than local DNS ({public_dns_success}% vs {local_dns_success}% success), suggesting WAN/upstream DNS instability."
+            )
+            next_steps.append("Check ISP path quality and test alternate upstream resolvers in AdGuard.")
+
+    if local_dns_p95 is not None and public_dns_p95 is not None:
+        if local_dns_p95 > (public_dns_p95 * 1.5):
+            diagnosis.append(
+                f"Local DNS latency spikes are higher than public DNS (P95 {local_dns_p95}ms vs {public_dns_p95}ms)."
+            )
+            next_steps.append("Review AdGuard host load and query logs during spike windows.")
+
+    if internet_success is not None and lan_success is not None and internet_success < (lan_success - 0.5):
+        diagnosis.append(
+            f"WAN/ISP path likely contributes to drops (internet success {internet_success}% vs LAN-related {lan_success}%)."
+        )
+        next_steps.append("Capture modem signal/event logs and compare timestamps with monitor failures.")
+
+    if internet_p95 is not None and lan_p95 is not None and internet_p95 > (lan_p95 * 1.4):
+        diagnosis.append(
+            f"WAN jitter appears higher than LAN jitter (internet P95 {internet_p95}ms vs LAN P95 {lan_p95}ms)."
+        )
+        next_steps.append("Look for ISP congestion windows and bufferbloat under upload/download load.")
+
+    worst = summary_rows[0] if summary_rows else None
+    if worst is not None and worst["success_pct"] < 99.0:
+        diagnosis.append(
+            f"Most problematic target in this window: '{worst['target_label']}' ({worst['success_pct']}% success, P95 {worst['p95_ms']}ms)."
+        )
+
+    if not diagnosis:
+        diagnosis.append(
+            "No single dominant root cause stood out in this window; failures/latency are relatively distributed across targets."
+        )
+        next_steps.append("Run longer (24-72h) and correlate failures to exact time windows, then compare with ISP/router logs.")
+
     html = [
         "<html><head><meta charset='utf-8'><title>Network Report</title>",
         (
@@ -342,6 +426,13 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int) -> None:
             " Outages shorter than this can be missed between checks."
             "</div>"
         )
+    html.append("<div class='card'><h3>Plain-English diagnosis</h3><ul>")
+    for d in diagnosis:
+        html.append(f"<li>{d}</li>")
+    html.append("</ul><h4>Suggested next checks</h4><ul>")
+    for step in next_steps:
+        html.append(f"<li>{step}</li>")
+    html.append("</ul></div>")
     html.append(
         "<table><tr><th>Health</th><th>Target</th><th>Samples</th><th>Success</th><th>Failures</th><th>Success %</th><th>Avg ms</th><th>P95 ms</th></tr>"
     )

@@ -37,6 +37,8 @@ Generate a quick HTML summary:
 python3 network_monitor.py report --csv logs/network_log.csv --output logs/network_report.html --since-hours 24
 ```
 
+The report now includes a **Plain-English diagnosis** section that highlights likely issue domains (local DNS/AdGuard, LAN path, or WAN/ISP) based on comparative success rates and P95 latency across target groups.
+
 ## DNS probe hostnames (`dns_probe_hosts`)
 
 Use 2+ stable hostnames (for example `cloudflare.com`, `google.com`) rather than only one domain. This makes the monitor more resilient if one name is blocked by policy, filtered, or temporarily not resolvable in your environment.
