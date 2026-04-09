@@ -569,6 +569,8 @@ def html_report(
             ".healthy{background:#eef9f0;}"
             ".watch{background:#fff8e8;}"
             ".needs-attention{background:#ffecec;}"
+            "th.sortable{cursor:pointer;user-select:none;}"
+            "th.sortable:hover{background:#ddd;}"
             "</style>"
         ),
         "</head><body>",
@@ -598,13 +600,28 @@ def html_report(
         html.append(f"<li>{step}</li>")
     html.append("</ul></div>")
     html.append("<div class='card'><h3>Automated correlation checklist</h3>")
+    html.append(
+        "<div class='card'><h4>Legend</h4>"
+        "<p><strong>Dominant area</strong> values:</p>"
+        "<ul>"
+        "<li><code>local_dns</code>: failures mainly in local DNS resolver path (ex: AdGuard/HA DNS)</li>"
+        "<li><code>public_dns</code>: failures mainly in public resolver path (internet/upstream DNS route)</li>"
+        "<li><code>wan</code>: failures mainly internet-facing targets (ISP/WAN path likely)</li>"
+        "<li><code>router_lan</code>: failures mainly at router/LAN hop</li>"
+        "<li><code>ha_adguard_host</code>: failures mainly at local HA/AdGuard host</li>"
+        "<li><code>latency_spike</code>: snapshot dominated by latency spike without clear failure cluster</li>"
+        "<li><code>other</code>: target did not map cleanly to a known domain</li>"
+        "</ul>"
+        "<p><strong>Hint</strong> text is generated from dominant area + thresholds and is intended as a starting hypothesis, not proof.</p>"
+        "</div>"
+    )
     if incident_rows:
         html.append(
             "<p>Potential incident windows are listed below (triggered when per-snapshot failure rate >= 20% "
             "or median latency >= 80ms).</p>"
         )
         html.append(
-            "<table><tr><th>Timestamp</th><th>Fail rate %</th><th>Median latency ms</th><th>Dominant area</th><th>Hint</th></tr>"
+            "<table id='incident-table'><tr><th class='sortable'>Timestamp</th><th class='sortable'>Fail rate %</th><th class='sortable'>Median latency ms</th><th class='sortable'>Dominant area</th><th class='sortable'>Hint</th></tr>"
         )
         for inc in incident_rows[:50]:
             ts_utc = str(inc["timestamp"])
@@ -640,7 +657,7 @@ def html_report(
             html.append("</ul>")
     html.append("</div>")
     html.append(
-        "<table><tr><th>Health</th><th>Target</th><th>Samples</th><th>Success</th><th>Failures</th><th>Success %</th><th>Avg ms</th><th>P95 ms</th></tr>"
+        "<table id='health-table'><tr><th class='sortable'>Health</th><th class='sortable'>Target</th><th class='sortable'>Samples</th><th class='sortable'>Success</th><th class='sortable'>Failures</th><th class='sortable'>Success %</th><th class='sortable'>Avg ms</th><th class='sortable'>P95 ms</th></tr>"
     )
     for row in summary_rows:
         row_class = row["health"].lower().replace(" ", "-")
@@ -667,6 +684,38 @@ def html_report(
             "});"
             "</script>"
         )
+    html.append(
+        "<script>"
+        "function toSortable(v){"
+        "const n=parseFloat(String(v).replace(/[^0-9.\\-]/g,''));"
+        "if(!Number.isNaN(n)) return {type:'num',value:n};"
+        "return {type:'str',value:String(v).toLowerCase()};"
+        "}"
+        "function makeSortable(tableId){"
+        "const table=document.getElementById(tableId);"
+        "if(!table) return;"
+        "const headers=table.querySelectorAll('th.sortable');"
+        "headers.forEach((th,idx)=>{"
+        "let asc=true;"
+        "th.addEventListener('click',()=>{"
+        "const rows=Array.from(table.querySelectorAll('tr')).slice(1);"
+        "rows.sort((a,b)=>{"
+        "const av=a.children[idx]?.innerText ?? '';"
+        "const bv=b.children[idx]?.innerText ?? '';"
+        "const as=toSortable(av);"
+        "const bs=toSortable(bv);"
+        "if(as.type==='num' && bs.type==='num'){return asc?as.value-bs.value:bs.value-as.value;}"
+        "return asc?as.value.localeCompare(bs.value):bs.value.localeCompare(as.value);"
+        "});"
+        "rows.forEach(r=>table.appendChild(r));"
+        "asc=!asc;"
+        "});"
+        "});"
+        "}"
+        "makeSortable('incident-table');"
+        "makeSortable('health-table');"
+        "</script>"
+    )
     html.append("</body></html>")
 
     ensure_parent(output_path)
