@@ -7,6 +7,7 @@ A lightweight Python monitor that continuously checks key points in your home ne
 - **ICMP ping latency** to local and internet targets (router, HA box, DNS resolvers, etc.)
 - **TCP connect time** to services like DNS/HTTPS
 - **Direct DNS query latency** against each DNS server (example: AdGuard vs public DNS)
+- **Multiple DNS probe hostnames** so one blocked/broken domain does not create a false alarm
 
 This helps isolate whether slowness is:
 
@@ -33,6 +34,12 @@ Generate a quick HTML summary:
 ```bash
 python3 network_monitor.py report --csv logs/network_log.csv --output logs/network_report.html --since-hours 24
 ```
+
+## DNS probe hostnames (`dns_probe_hosts`)
+
+Use 2+ stable hostnames (for example `cloudflare.com`, `google.com`) rather than only one domain. This makes the monitor more resilient if one name is blocked by policy, filtered, or temporarily not resolvable in your environment.
+
+If you see browser errors like `ERR_NAME_NOT_RESOLVED`, that is exactly the type of DNS failure this monitor should log. Compare results across your local resolver (AdGuard) and a public resolver to isolate whether the issue is local DNS policy/service or upstream connectivity.
 
 ## Suggested config for your setup
 

@@ -41,7 +41,7 @@ DEFAULT_CONFIG = {
     "ping_count": 1,
     "ping_timeout_seconds": 2,
     "dns_servers": ["192.168.1.2", "8.8.8.8"],
-    "dns_probe_host": "example.com",
+    "dns_probe_hosts": ["cloudflare.com", "google.com"],
     "latency_targets": [
         {"name": "router", "host": "192.168.1.1"},
         {"name": "ha_box", "host": "192.168.1.10"},
@@ -190,6 +190,12 @@ def run_monitor(config: dict, csv_path: Path, jsonl_path: Path, loops: Optional[
     dns_timeout = float(config["dns_timeout_seconds"])
 
     i = 0
+    dns_probe_hosts = config.get("dns_probe_hosts")
+    if not dns_probe_hosts:
+        # Backward compatibility with earlier single-host key.
+        fallback_host = config.get("dns_probe_host", "cloudflare.com")
+        dns_probe_hosts = [fallback_host]
+
     while loops is None or i < loops:
         ts = iso_now()
         rows: list[ProbeResult] = []
@@ -213,8 +219,19 @@ def run_monitor(config: dict, csv_path: Path, jsonl_path: Path, loops: Optional[
             )
 
         for server in config["dns_servers"]:
-            ok, ms, value, err = dns_query_ms(server, config["dns_probe_host"], dns_timeout)
-            rows.append(ProbeResult(ts, f"dns_{server}", "dns_query", ok, round(ms, 2) if ms else None, value, err))
+            for host in dns_probe_hosts:
+                ok, ms, value, err = dns_query_ms(server, host, dns_timeout)
+                rows.append(
+                    ProbeResult(
+                        ts,
+                        f"dns_{server}_{host}",
+                        "dns_query",
+                        ok,
+                        round(ms, 2) if ms else None,
+                        value,
+                        err,
+                    )
+                )
 
         append_results(csv_path, jsonl_path, rows)
 
