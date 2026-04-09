@@ -39,6 +39,28 @@ python3 network_monitor.py report --csv logs/network_log.csv --output logs/netwo
 
 The report now includes a **Plain-English diagnosis** section that highlights likely issue domains (local DNS/AdGuard, LAN path, or WAN/ISP) based on comparative success rates and P95 latency across target groups.
 
+You can also include a router log bundle (tar/tar.gz) in the report generation step:
+
+```bash
+python3 network_monitor.py report \
+  --csv logs/network_log.csv \
+  --output logs/network_report.html \
+  --since-hours 24 \
+  --router-bundle /path/to/router_logs.tar
+```
+
+When provided, the report adds:
+- an **Automated correlation checklist** of incident windows from monitor data
+- a **best-effort router bundle scan** for suspicious WAN/DNS/disconnect log lines
+
+If you want to inspect a router bundle **without mixing it into monitor report output**, use:
+
+```bash
+python3 network_monitor.py inspect-router-bundle \
+  --bundle /path/to/router_logs.tar \
+  --output logs/router_bundle_inspection.txt
+```
+
 ## DNS probe hostnames (`dns_probe_hosts`)
 
 Use 2+ stable hostnames (for example `cloudflare.com`, `google.com`) rather than only one domain. This makes the monitor more resilient if one name is blocked by policy, filtered, or temporarily not resolvable in your environment.

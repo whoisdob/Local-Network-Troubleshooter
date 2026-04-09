@@ -17,7 +17,9 @@ import statistics
 import struct
 import subprocess
 import sys
+import tarfile
 import time
+import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -246,7 +248,101 @@ def run_monitor(config: dict, csv_path: Path, jsonl_path: Path, loops: Optional[
             time.sleep(interval)
 
 
-def html_report(csv_path: Path, output_path: Path, since_hours: int) -> None:
+def _target_domain(target: str) -> str:
+    t = target.lower()
+    if t.startswith("dns_") and ("192.168." in t or "10." in t or "172." in t):
+        return "local_dns"
+    if t.startswith("dns_"):
+        return "public_dns"
+    if "internet_" in t or "cloudflare_https" in t:
+        return "wan"
+    if "router" in t:
+        return "router_lan"
+    if "ha_" in t or "adguard" in t:
+        return "ha_adguard_host"
+    return "other"
+
+
+def _scan_router_bundle(router_bundle: Path) -> tuple[list[str], list[str]]:
+    """Best-effort scan of a router tar bundle for suspicious log lines."""
+    if not router_bundle.exists():
+        return [], [f"Router bundle not found: {router_bundle}"]
+
+    keywords = [
+        "wan",
+        "disconnect",
+        "pppoe",
+        "dhcp",
+        "dns",
+        "timeout",
+        "link down",
+        "loss",
+        "renew",
+        "upstream",
+    ]
+    matched_lines: list[str] = []
+    notes: list[str] = []
+    try:
+        with tarfile.open(router_bundle, "r:*") as tf:
+            members = [m for m in tf.getmembers() if m.isfile()]
+            for member in members[:100]:
+                name = member.name.lower()
+                if not any(name.endswith(ext) for ext in (".log", ".txt", ".csv", ".json")):
+                    continue
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    continue
+                raw = extracted.read().decode("utf-8", errors="replace")
+                for line in raw.splitlines()[:5000]:
+                    low = line.lower()
+                    if any(k in low for k in keywords):
+                        cleaned = re.sub(r"\s+", " ", line.strip())
+                        if cleaned:
+                            matched_lines.append(f"{member.name}: {cleaned}")
+                    if len(matched_lines) >= 40:
+                        break
+                if len(matched_lines) >= 40:
+                    break
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"Could not parse router bundle: {exc}")
+        return [], notes
+
+    if not matched_lines:
+        notes.append("No obvious WAN/DNS/disconnect keywords found in first-pass scan.")
+    return matched_lines, notes
+
+
+def inspect_router_bundle(bundle: Path, output: Optional[Path], max_matches: int) -> int:
+    """Standalone router bundle inspection (independent of network probe logs)."""
+    matches, notes = _scan_router_bundle(bundle)
+    lines = [
+        f"Router bundle inspection: {bundle}",
+        f"Generated: {iso_now()}",
+        f"Matches found: {len(matches)}",
+        "",
+    ]
+    if notes:
+        lines.append("Notes:")
+        lines.extend(f"- {n}" for n in notes)
+        lines.append("")
+    if matches:
+        lines.append(f"Top suspicious lines (max {max_matches}):")
+        for m in matches[:max_matches]:
+            lines.append(f"- {m}")
+    else:
+        lines.append("No suspicious lines found with current keyword scanner.")
+
+    report_text = "\n".join(lines) + "\n"
+    if output is None:
+        print(report_text)
+    else:
+        ensure_parent(output)
+        output.write_text(report_text, encoding="utf-8")
+        print(f"Wrote router bundle report to {output}")
+    return 0
+
+
+def html_report(csv_path: Path, output_path: Path, since_hours: int, router_bundle: Optional[Path] = None) -> None:
     if not csv_path.exists():
         raise FileNotFoundError(f"No log file: {csv_path}")
 
@@ -258,6 +354,11 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int) -> None:
             ts = datetime.fromisoformat(r["timestamp"]).timestamp()
             if ts >= cutoff:
                 rows.append(r)
+
+    # Build per-timestamp snapshots for automated incident correlation.
+    snapshots: dict[str, list[dict]] = {}
+    for r in rows:
+        snapshots.setdefault(r["timestamp"], []).append(r)
 
     by_target: dict[str, list[dict]] = {}
     for r in rows:
@@ -396,6 +497,46 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int) -> None:
         )
         next_steps.append("Run longer (24-72h) and correlate failures to exact time windows, then compare with ISP/router logs.")
 
+    incident_rows = []
+    for ts, items in sorted(snapshots.items()):
+        total = len(items)
+        failures = [x for x in items if str(x.get("success", "")).lower() != "true"]
+        fail_rate = (len(failures) / total) * 100.0 if total else 0.0
+        lat_vals = [
+            float(x["latency_ms"])
+            for x in items
+            if x.get("latency_ms") not in ("", "None", None)
+        ]
+        median_latency = statistics.median(lat_vals) if lat_vals else None
+        if fail_rate >= 20.0 or (median_latency is not None and median_latency >= 80.0):
+            by_domain: dict[str, int] = {}
+            for f in failures:
+                d = _target_domain(str(f.get("target", "")))
+                by_domain[d] = by_domain.get(d, 0) + 1
+            dominant = max(by_domain.items(), key=lambda kv: kv[1])[0] if by_domain else "latency_spike"
+            if dominant == "local_dns":
+                hint = "Likely local DNS/AdGuard path issue during this window."
+            elif dominant == "wan":
+                hint = "Likely WAN/ISP path issue during this window."
+            elif dominant in ("router_lan", "ha_adguard_host"):
+                hint = "Likely LAN or local host segment issue during this window."
+            else:
+                hint = "Mixed/unclear failure pattern."
+            incident_rows.append(
+                {
+                    "timestamp": ts,
+                    "fail_rate": round(fail_rate, 1),
+                    "median_latency": round(median_latency, 2) if median_latency is not None else None,
+                    "dominant": dominant,
+                    "hint": hint,
+                }
+            )
+
+    router_lines: list[str] = []
+    router_notes: list[str] = []
+    if router_bundle is not None:
+        router_lines, router_notes = _scan_router_bundle(router_bundle)
+
     html = [
         "<html><head><meta charset='utf-8'><title>Network Report</title>",
         (
@@ -433,6 +574,39 @@ def html_report(csv_path: Path, output_path: Path, since_hours: int) -> None:
     for step in next_steps:
         html.append(f"<li>{step}</li>")
     html.append("</ul></div>")
+    html.append("<div class='card'><h3>Automated correlation checklist</h3>")
+    if incident_rows:
+        html.append(
+            "<p>Potential incident windows are listed below (triggered when per-snapshot failure rate >= 20% "
+            "or median latency >= 80ms).</p>"
+        )
+        html.append(
+            "<table><tr><th>Timestamp (UTC)</th><th>Fail rate %</th><th>Median latency ms</th><th>Dominant area</th><th>Hint</th></tr>"
+        )
+        for inc in incident_rows[:50]:
+            html.append(
+                "<tr><td>{timestamp}</td><td>{fail_rate}</td><td>{median_latency}</td><td>{dominant}</td><td>{hint}</td></tr>".format(
+                    **inc
+                )
+            )
+        html.append("</table>")
+    else:
+        html.append("<p>No high-severity incident windows were detected using current thresholds.</p>")
+
+    if router_bundle is not None:
+        html.append("<h4>Router bundle scan (best effort)</h4>")
+        html.append(f"<p>Bundle: <code>{router_bundle}</code></p>")
+        if router_notes:
+            html.append("<ul>")
+            for note in router_notes:
+                html.append(f"<li>{note}</li>")
+            html.append("</ul>")
+        if router_lines:
+            html.append("<p>Suspicious keyword matches (first 40):</p><ul>")
+            for line in router_lines[:40]:
+                html.append(f"<li><code>{line}</code></li>")
+            html.append("</ul>")
+    html.append("</div>")
     html.append(
         "<table><tr><th>Health</th><th>Target</th><th>Samples</th><th>Success</th><th>Failures</th><th>Success %</th><th>Avg ms</th><th>P95 ms</th></tr>"
     )
@@ -472,6 +646,12 @@ def parse_args() -> argparse.Namespace:
     rep_p.add_argument("--csv", default="logs/network_log.csv", type=Path)
     rep_p.add_argument("--output", default="logs/network_report.html", type=Path)
     rep_p.add_argument("--since-hours", type=int, default=24)
+    rep_p.add_argument("--router-bundle", type=Path, default=None, help="Optional router tar/tar.gz log bundle")
+
+    rb_p = sub.add_parser("inspect-router-bundle", help="Inspect router tar/tar.gz logs standalone")
+    rb_p.add_argument("--bundle", type=Path, required=True, help="Path to router tar/tar.gz bundle")
+    rb_p.add_argument("--output", type=Path, default=None, help="Optional text report output path")
+    rb_p.add_argument("--max-matches", type=int, default=80, help="Max suspicious lines to include")
 
     cfg_p = sub.add_parser("init-config", help="Write a starter config file")
     cfg_p.add_argument("--output", default="config.json", type=Path)
@@ -496,9 +676,12 @@ def main() -> int:
         return 0
 
     if args.command == "report":
-        html_report(args.csv, args.output, args.since_hours)
+        html_report(args.csv, args.output, args.since_hours, args.router_bundle)
         print(f"Wrote report to {args.output}")
         return 0
+
+    if args.command == "inspect-router-bundle":
+        return inspect_router_bundle(args.bundle, args.output, args.max_matches)
 
     return 1
 
